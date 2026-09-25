@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { extractTurn, sanitizeArguments } from "./evo-capture";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import evoCaptureExtension, { extractTurn, parseClassifierVerdict, sanitizeArguments } from "./evo-capture";
 
 function userEntry(id: string, text: string, extra?: Record<string, unknown>) {
   return {
@@ -132,5 +133,204 @@ describe("sanitizeArguments", () => {
   test("returns empty record for non-record input", () => {
     expect(sanitizeArguments("nope")).toEqual({});
     expect(sanitizeArguments(null)).toEqual({});
+  });
+});
+
+interface HookMessage {
+  customType: string;
+  content: string;
+  display: boolean;
+  attribution: string;
+}
+
+interface HookResult {
+  message?: HookMessage;
+}
+
+describe("parseClassifierVerdict", () => {
+  test("accepts bare YES/NO case-insensitively with optional period", () => {
+    expect(parseClassifierVerdict("YES")).toBe("yes");
+    expect(parseClassifierVerdict("  yes. ")).toBe("yes");
+    expect(parseClassifierVerdict("Yes")).toBe("yes");
+    expect(parseClassifierVerdict("NO")).toBe("no");
+    expect(parseClassifierVerdict("  no. ")).toBe("no");
+    expect(parseClassifierVerdict("nO")).toBe("no");
+  });
+
+  test("rejects prose, hedged, and non-string replies as unknown", () => {
+    expect(parseClassifierVerdict("YES, it has both")).toBe("unknown");
+    expect(parseClassifierVerdict("NO because no data")).toBe("unknown");
+    expect(parseClassifierVerdict("YES\nNO")).toBe("unknown");
+    expect(parseClassifierVerdict("")).toBe("unknown");
+    expect(parseClassifierVerdict("   ")).toBe("unknown");
+    expect(parseClassifierVerdict("maybe")).toBe("unknown");
+    expect(parseClassifierVerdict(undefined)).toBe("unknown");
+    expect(parseClassifierVerdict(null)).toBe("unknown");
+    expect(parseClassifierVerdict(42)).toBe("unknown");
+    expect(parseClassifierVerdict({ verdict: "yes" })).toBe("unknown");
+  });
+});
+
+describe("before_agent_start tiny gate", () => {
+  interface Mount {
+    fire: (prompt: string, cwd?: string) => Promise<HookResult | undefined>;
+    creates: () => number;
+    debugLogs: () => unknown[][];
+  }
+
+  function mount(replyText: string, hooks?: {
+    model?: unknown;
+    failCreate?: boolean;
+    failTurn?: boolean;
+    stopReason?: string;
+  }): Mount {
+    const model = hooks && "model" in hooks ? hooks.model : { id: "tiny" };
+    const handlers: Record<string, (event: unknown, ctx: unknown) => Promise<unknown>> = {};
+    const debugLogs: unknown[][] = [];
+    let creates = 0;
+    const sdk = {
+      createAgentSession: async () => {
+        creates += 1;
+        if (hooks?.failCreate) throw new Error("sdk unavailable");
+        return {
+          session: {
+            runEphemeralTurn: async () => {
+              if (hooks?.failTurn) throw new Error("inference failed");
+              return { replyText, assistantMessage: { stopReason: hooks?.stopReason ?? "stop" } };
+            },
+            dispose: async () => {},
+          },
+        };
+      },
+      SessionManager: { inMemory: () => ({}) },
+    };
+    const stubPi = {
+      setLabel: () => {},
+      on: (event: string, handler: (event: unknown, ctx: unknown) => Promise<unknown>) => {
+        handlers[event] = handler;
+      },
+      logger: {
+        debug: (...args: unknown[]) => {
+          debugLogs.push(args);
+        },
+        error: () => {},
+        warn: () => {},
+        info: () => {},
+      },
+      pi: sdk,
+    };
+    evoCaptureExtension(stubPi as unknown as ExtensionAPI);
+    const fire = async (prompt: string, cwd = "/repo") => {
+      const ctx = {
+        cwd,
+        models: {
+          resolve: () => model,
+        },
+        modelRegistry: { id: "registry" },
+      } as unknown as ExtensionContext;
+      const handler = handlers["before_agent_start"];
+      if (!handler) throw new Error("before_agent_start handler not registered");
+      const result = await handler({ type: "before_agent_start", prompt, systemPrompt: [] }, ctx);
+      return result as HookResult | undefined;
+    };
+    return {
+      fire,
+      creates: () => creates,
+      debugLogs: () => debugLogs,
+    };
+  }
+
+  test("generic turn returns no message", async () => {
+    const gate = mount("NO");
+    const result = await gate.fire("fix the typo in README");
+    expect(result).toBeUndefined();
+    expect(gate.creates()).toBe(1);
+  });
+
+  test("data task returns a hidden task instruction without user text", async () => {
+    const gate = mount("YES");
+    const result = await gate.fire("Analyze quux-plugh-9z.csv for churn trends");
+    expect(result?.message?.display).toBe(false);
+    expect(result?.message?.content).toContain("agent: 'task'");
+    expect(result?.message?.content).not.toContain("quux-plugh-9z");
+    for (const entry of gate.debugLogs()) {
+      expect(JSON.stringify(entry)).not.toContain("quux-plugh-9z");
+    }
+  });
+
+  test("ambiguous reply fails open with hidden conditional guidance", async () => {
+    const gate = mount("YES, probably");
+    const result = await gate.fire("Analyze sales.csv");
+    expect(result?.message?.display).toBe(false);
+    expect(result?.message?.content).toContain("If and only if");
+    expect(result?.message?.content).not.toContain("agent: 'task'");
+  });
+
+  test("missing @tiny fails open without running inference", async () => {
+    const gate = mount("YES", { model: undefined });
+    const result = await gate.fire("Analyze sales.csv");
+    expect(result?.message?.display).toBe(false);
+    expect(result?.message?.content).toContain("If and only if");
+    expect(result?.message?.content).not.toContain("agent: 'task'");
+    expect(gate.creates()).toBe(0);
+  });
+
+  test("classifier failure fails open with hidden conditional guidance", async () => {
+    const failedCreate = mount("YES", { failCreate: true });
+    const viaCreate = await failedCreate.fire("Analyze sales.csv");
+    expect(viaCreate?.message?.display).toBe(false);
+    expect(viaCreate?.message?.content).toContain("If and only if");
+    expect(viaCreate?.message?.content).not.toContain("agent: 'task'");
+    const failedTurn = mount("YES", { failTurn: true });
+    const viaTurn = await failedTurn.fire("Analyze sales.csv");
+    expect(viaTurn?.message?.display).toBe(false);
+    expect(viaTurn?.message?.content).toContain("If and only if");
+    expect(viaTurn?.message?.content).not.toContain("agent: 'task'");
+  });
+
+  test("retry replays reuse one inference instead of rerunning the model", async () => {
+    const gate = mount("NO");
+    const prompt = "fix the typo in README";
+    await gate.fire(prompt);
+    await gate.fire(prompt);
+    await gate.fire(prompt);
+    expect(gate.creates()).toBe(1);
+    const other = mount("NO");
+    await other.fire("first prompt");
+    await other.fire("second prompt");
+    expect(other.creates()).toBe(2);
+  });
+
+  test("verdicts do not leak across projects", async () => {
+    const gate = mount("NO");
+    await gate.fire("same prompt", "/repo-a");
+    await gate.fire("same prompt", "/repo-b");
+    expect(gate.creates()).toBe(2);
+    await gate.fire("same prompt", "/repo-a");
+    expect(gate.creates()).toBe(2);
+  });
+
+  test("empty prompt returns nothing without running inference", async () => {
+    const gate = mount("YES");
+    expect(await gate.fire("   ")).toBeUndefined();
+    expect(gate.creates()).toBe(0);
+  });
+
+  test("NO on an overlong prompt fails open instead of staying silent", async () => {
+    const gate = mount("NO");
+    const prompt = `${"padding ".repeat(400)}quux-plugh-9z tail`;
+    expect(prompt.length).toBeGreaterThan(2000);
+    const result = await gate.fire(prompt);
+    expect(result?.message?.display).toBe(false);
+    expect(result?.message?.content).toContain("If and only if");
+    expect(result?.message?.content).not.toContain("agent: 'task'");
+  });
+
+  test("budget-truncated verdict fails open instead of trusting a cut reply", async () => {
+    const gate = mount("NO", { stopReason: "length" });
+    const result = await gate.fire("fix the typo in README");
+    expect(result?.message?.display).toBe(false);
+    expect(result?.message?.content).toContain("If and only if");
+    expect(result?.message?.content).not.toContain("agent: 'task'");
   });
 });

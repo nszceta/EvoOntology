@@ -285,10 +285,15 @@ Legacy flat root（`project.json` 直接落在 shared root 下）仅当其持久
 
 扩展是一个默认导出的 `ExtensionAPI` factory：`agent_end`（且仅当 `!willContinue`）
 做采集，本身不直接调 MCP；它 spawn Python recorder 并传入 shared store。全局启用的
-`before_agent_start` hook 在每个真实非空用户 prompt 上返回一条短条件提示（仅消息，
-不写任何状态）：仅当请求同时给出可识别 data source 和 analytical goal 时，agent 才做
-lane 检查（`list_versions`）/ 未初始化时走 grounded build；普通 coding turn 也会收到该
-条件提示，但永不 build。Hook 本身绝不从代码里自动 build、发布或进化。
+`before_agent_start` hook 对每个真实非空用户 prompt 做静默 per-turn 门禁（不写任何状态）：
+用 isolated 无工具会话调用已配置 `@tiny` 模型，独立判断该 prompt 是否同时给出可识别
+data source **和** analytical goal。普通请求不返回任何消息（无 UI 打扰）；仅当肯定结论时，
+才注入隐藏（`display: false`）指引，指示 main agent 把 lane 检查（`list_versions`）/
+未初始化时的 grounded build 委托给 task-model `task` agent，并在最终回复中使用其结果——
+委托只是给 main agent 的指令，不是 hook 直接派发（`before_agent_start` 无法 spawn task 工具）。
+未知模型 / 出错 / 超时则 fail-open，返回隐藏的条件安全指引。Hook 永不切换会话模型，
+绝不从代码里自动 build、发布或进化；采集仍在每个完成的 turn 运行。代价：一 turn 一次小
+分类往返；若 `@tiny` 配置为云模型，有界 prompt 文本会出本机。
 
 方案 A —— 软链到自动发现的用户目录（与其他用户全局扩展同一模式）：
 
@@ -328,8 +333,10 @@ active 版本才会被记录，别 lane 的版本不会混用。
 ### 10.5 按需构建（on-demand grounded build）
 
 - 当 turn 是数据任务、且同时给出可识别的 data source **和** analytical goal 时，
-  agent 调用 grounded workflow（build-ontology skill）；缺证据或评估不可行时 build
-  中止，lane 保持为空。
+  main agent 被指示把 grounded workflow（build-ontology skill）委托给 task-model `task` agent
+  执行，并在最终回复中使用其结果——这只是条件性指示，不保证 main agent 一定 spawn；
+  缺证据或评估不可行时 build 中止，lane 保持为空。
+  仅肯定结论才有隐藏指引，普通请求无消息。
 - 普通 coding、重构、或缺 source / 缺 goal 时，只采集观察到的 turn，不 build。
 - Build 门禁：源证据 + `validate_semantics`；Parent/Candidate gate 只用于进化发布，
   不用于初始 build。空 lane 允许冷启动；无有效 grounding 时记 coverage gap 或已知局限，
@@ -341,12 +348,13 @@ active 版本才会被记录，别 lane 的版本不会混用。
 - 采集不写 `project.json`、`active.json`、`versions/`、`evolution/`。
 - 代码路径不自动发布语义事实、不自动 build、不自动进化：初始发布经 skill 的源证据
   + `validate_semantics`，进化发布另经 Parent/Candidate gate。
-- 通用 coding turn 永不触发 build；无 source 或无 goal 时只采集，不推断语义。
+- 通用 coding turn 无 hook 消息，永不触发 build；无 source 或无 goal 时只采集，不推断语义。
 
 ### 10.7 有界本地持久化与隐私
 
-- 全部数据只落在 shared root 本地（各 lane 内）；随时可以查看或删除
-  `projects/<hash>/trajectories/*.json`。没有任何上传。
+- 全部采集数据只落在 shared root 本地（各 lane 内）；随时可以查看或删除
+  `projects/<hash>/trajectories/*.json`。采集本身没有任何上传；唯一的例外是
+  10.3 的 `@tiny` 门禁往返——若 `@tiny` 配置为云模型，有界 prompt 文本会出本机。
 - Native 工具结果截断为有界预览（2000 字符 / 20 行 + 摘要）；agent 的 prose
   和 chain-of-thought 不落盘——只保留可观察的工具输入/结果和 final answer。
 - 写入前对可疑 secret 值做 best-effort 脱敏。这是本地卫生措施，不是加密。

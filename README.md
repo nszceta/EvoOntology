@@ -173,13 +173,24 @@ completed turn captures one lane-routed trajectory automatically via
   cwd as default `project_root`; explicit `project_root` on any tool overrides it.
 - Extension: user-global (`~/.omp/agent/extensions/` symlink or `config.yml`
   entry); `agent_end` capture never calls MCP directly. A global
-  `before_agent_start` hook returns a short conditional advisory on every
-  genuine prompt (message-only, writes no state): the agent proceeds to a lane
-  check / grounded build only when the request identifies a data source AND
-  analytical goal — it never builds from code.
+  `before_agent_start` hook runs a silent per-turn gate (writes no state): it
+  asks the configured `@tiny` model in an isolated no-tools session whether the
+  genuine prompt identifies BOTH an identifiable data source AND an analytical
+  goal. Generic requests get no message. Only an affirmative verdict injects
+  hidden (`display: false`) guidance instructing the main agent to delegate the
+  lane check / grounded build to the task-model `task` agent and use its result
+  in the final reply — delegation is an instruction to the main agent, not a
+  direct hook dispatch (`before_agent_start` cannot spawn the task tool).
+  Unknown model, error, or timeout fails open with hidden conditional safety
+  guidance. The hook never switches the session model and never builds from
+  code; capture still runs on every completed turn. Tradeoff: one small
+  classifier round-trip per turn, and a cloud-configured `@tiny` sends bounded
+  prompt text off-host.
 - Capture writes trajectories only. On a data task with an identifiable data
-  source AND analytical goal the agent invokes the grounded build workflow
-  (source evidence + `validate_semantics`); missing evidence may stop the build
+  source AND analytical goal the main agent is instructed to delegate the
+  grounded build workflow to the task-model `task` agent (source evidence +
+  `validate_semantics`) and use its result in the final reply — conditional,
+  no guarantee the main agent spawns it; missing evidence may stop the build
   with the lane left empty. Parent/Candidate gate is evolution-only. Generic
   coding captures the observed turn only; no fabricated semantic facts.
 - Trajectories stay local and bounded (truncated results, no prose/CoT,
