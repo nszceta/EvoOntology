@@ -155,6 +155,40 @@ Codex prepares questions from user needs, relevant project history and grounded 
 Once built, the Data Agent can call `browse_semantics` and `resolve_semantics` without additional ontology configuration. See the [usage guide](USAGE.md) for the full workflow and data boundaries.
 
 
+## 🖥️ OMP User-Global Integration
+
+For oh-my-pi (OMP) users, EvoOntology runs user-global from this clone: one
+external shared root (`/home/adam/.omp/ontologies/shared`) across all projects,
+no per-project `.evoontology/`, with internal per-project lanes under
+`projects/<sha256(canonical project root)[:16]>` for `project.json`,
+`active.json`, `versions/`, `trajectories/`, `evolution/`, and `state.json`.
+Project identity is the nearest ancestor Git checkout root (nearest `.git`),
+so subdirectories of one repo share a lane; non-Git cwd keeps its own identity. Each
+completed turn captures one lane-routed trajectory automatically via
+[`integrations/omp/evo-capture.ts`](integrations/omp/evo-capture.ts) →
+`python -m evoontology.trajectory.omp_capture`.
+
+- MCP: `evo-semantic` in `~/.omp/agent/mcp.json` with `--project` at this clone,
+  `--store` at the shared root, and opt-in `--project-aware` binding the launch
+  cwd as default `project_root`; explicit `project_root` on any tool overrides it.
+- Extension: user-global (`~/.omp/agent/extensions/` symlink or `config.yml`
+  entry); `agent_end` capture never calls MCP directly. A global
+  `before_agent_start` hook returns a short conditional advisory on every
+  genuine prompt (message-only, writes no state): the agent proceeds to a lane
+  check / grounded build only when the request identifies a data source AND
+  analytical goal — it never builds from code.
+- Capture writes trajectories only. On a data task with an identifiable data
+  source AND analytical goal the agent invokes the grounded build workflow
+  (source evidence + `validate_semantics`); missing evidence may stop the build
+  with the lane left empty. Parent/Candidate gate is evolution-only. Generic
+  coding captures the observed turn only; no fabricated semantic facts.
+- Trajectories stay local and bounded (truncated results, no prose/CoT,
+  best-effort redaction); retries are idempotent by project + session + turn.
+
+Full setup, lane layout, routing, capture/build contract, privacy, switching,
+and a sandboxed smoke test: [USAGE.md §10](USAGE.md) (Chinese-language contract).
+
+
 ## 📊 Performance
 
 Across the four-backbone analysis subset, the builder-constructed **Initial Ontology Layer** improves over **ReAct without an Ontology Layer**, and self-evolution produces a further gain with **EvoOntology** on all three benchmarks.
@@ -188,6 +222,7 @@ Each environment implements an `EvolutionAdapter` and preserves its native rollo
 | [`plugins/`](plugins/) | Self-contained Claude Code and Codex plugins with Build, Evolve, and Visualize skills. |
 | [`benchmarks/`](benchmarks/) | BIRD, DDR-10K, and InsightBench evaluation environments. |
 | [`docs/`](docs/) | Architecture and benchmark-integration documentation. |
+| [`integrations/`](integrations/) | Host-agent integrations: OMP user-global capture extension (`omp/evo-capture.ts`). |
 | [`scripts/`](scripts/) | Core-to-plugin synchronization utilities. |
 
 ## 📚 Documentation

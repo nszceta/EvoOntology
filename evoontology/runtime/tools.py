@@ -26,6 +26,15 @@ _VISUALIZE_WORKSPACE = {
         "the exact workspace when multiple databases match."
     ),
 }
+_PROJECT_ROOT = {
+    "type": "string",
+    "description": (
+        "Canonical absolute project root for --project-aware lane routing "
+        "(explicit per-call override of the server launch cwd default; omit "
+        "in legacy mode for exact flat behavior)."
+    ),
+}
+
 
 
 TOOLS = [
@@ -370,7 +379,7 @@ _ARRAY = {"type": "array", "items": {"type": "object"}}
 
 def _workflow_tool(name, description, properties, required=()):
     return {"name": name, "description": description, "inputSchema": {
-        "type": "object", "properties": {"workspace": _WORKSPACE, **properties},
+        "type": "object", "properties": {"workspace": _WORKSPACE, "project_root": _PROJECT_ROOT, **properties},
         "required": ["workspace", *required], "additionalProperties": False}}
 
 OPERATIONS.extend([
@@ -403,3 +412,9 @@ OPERATIONS.extend([
                     "limitations": {"type": "array", "items": _STRING}, "links": _ARRAY},
                    ["version", "summary", "limitations", "links"]),
 ])
+
+# Project-aware routing: optional project_root on every workspace-taking tool.
+# additionalProperties False is retained; the field is never required so legacy
+# flat calls without it behave exactly as before.
+for _spec in TOOLS + OPERATIONS:
+    _spec["inputSchema"]["properties"].setdefault("project_root", _PROJECT_ROOT)

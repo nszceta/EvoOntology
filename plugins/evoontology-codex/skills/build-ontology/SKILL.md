@@ -5,6 +5,17 @@ description: Build an initial ontology from data and analytical goals, prepare r
 
 # Build Ontology Layer
 
+## Host scope
+
+- When running under OMP: Default workspace is `/home/adam/.omp/ontologies/shared`, shared across OMP sessions and repositories. Pass that absolute path as `workspace` to every workspace-taking tool; never derive the default from the current working directory. A different workspace requires an explicit user request.
+- When running under OMP: Also pass the current canonical `project_root` (OMP ctx.cwd / repo root, absolute resolved path) to every workspace-taking tool that accepts it. The server routes shared workspace + `project_root` internally to the selected project lane under `shared/projects/<hash>`; the lane path is an implementation detail — never pass a lane as `workspace`, never construct, guess, or list it. A server launched with `--project-aware` binds its launch cwd as the default `project_root`; an explicit per-call `project_root` always overrides it, so always send the current project explicitly.
+- When running under OMP: All relative state paths below (project.json, versions/, trajectories/, evolution/) are relative to the selected project lane, not the literal shared root. Relative references/links remain relative to this skill directory.
+- When running under OMP: Preserve source/project provenance and applicability in the existing schema. `project_root` is routing identity; `data_source` is the actual data environment — they are persisted separately and must not be conflated. Do not overwrite another project's lane or equate similarly named concepts just because the repository changed.
+- When running under OMP: An empty lane is valid uninitialized state. Legacy flat files at the shared root are reused only when their persisted `project_root` or `data_source` unambiguously matches the current canonical `project_root`; otherwise the lane starts empty. Never address the literal shared-root `project.json` directly.
+- When running under OMP: On a relevant data task with an identifiable data source AND analytical goal, automatically build a grounded initial version through this skill's evidence + validate/publish gates (`save_version` → `annotate_ontology_version` → `publish_ontology_build`) if the selected project lane has no active version — this is the initial-build gate, not the Parent/Candidate evolution gate. Generic code tasks without both source and goal never trigger a build: capture the observed turn only and never fabricate facts to fill a build. If the lane already has an active version, use it; never rebuild blindly.
+- When running under OMP: Use the exposed evo-semantic MCP tools. For visualization/publication/finalization pass `open_browser:false`; return the generated path, or use OMP browser tools when requested. Do not invoke Codex-only UI tools.
+- When running under Codex: Default workspace is the current project's `.evoontology/`; pass its absolute path to every workspace-taking tool. Use an explicit path only when the user provides one. The OMP rules above do not apply; follow the Codex desktop presentation section below.
+
 Construct the first version of an ontology layer for a target workload.
 
 The goal is to discover reusable, evidence-grounded analytical knowledge
@@ -44,10 +55,10 @@ follow ontology-layer-data-boundary.md.
 
 Before construction, establish the project context and data boundary.
 
-If an active semantic version already exists, do not rebuild or overwrite it. Direct the user to evolution unless they explicitly request a new workspace or destructive reinitialization.
+If an active semantic version already exists in the selected project lane, do not rebuild or overwrite it. Direct the user to evolution unless they explicitly request a new workspace or destructive reinitialization.
 ### 1. Resolve context
 
-If `.evoontology/project.json` exists, load and reuse the persisted project
+If `project.json` in the selected project lane exists (the lane routed from `/home/adam/.omp/ontologies/shared` + current canonical `project_root` under OMP — never address the literal shared-root `project.json` directly; `.evoontology/project.json` under Codex), load and reuse the persisted project
 context. Do not re-infer or overwrite it unless the user explicitly requests
 reconfiguration.
 
@@ -85,7 +96,7 @@ For **Rolling-Trajectory Mode**:
 Present a concise summary of the data source, analytical scope and evaluation
 boundary. Reuse explicit authorization already in the request; ask only when a
 material source or business-definition ambiguity remains. Persist context using
-configure_ontology_project. Do not require users to choose internal mode names.
+configure_ontology_project (under OMP pass `workspace` as the shared root plus the current canonical `project_root` so the context lands in the selected project lane; `project_root` is stored separately from the actual `data_source`). Do not require users to choose internal mode names.
 Later evolution runs must reuse this context rather than infer it again.
 
 **Stage Output:** A resolved and persisted project context and data boundary.
@@ -240,7 +251,7 @@ Publish the initial ontology-layer version with:
 - seed-workload source when using Rolling-Trajectory Mode.
 
 Complete publication through the `evo-semantic` MCP tools (pass the absolute
-`.evoontology/` path as `workspace`; do not run `python -m evoontology...`) in
+selected-workspace path as `workspace` — `/home/adam/.omp/ontologies/shared` under OMP, the current project's `.evoontology/` under Codex — unless the user explicitly selected another workspace; under OMP also pass the current canonical `project_root` on every call and never pass the internal lane path as `workspace`; do not run `python -m evoontology...`) in
 this order:
 
 1. `save_version` — write `ontology_v0`'s five record files;
@@ -260,9 +271,13 @@ the first evolution run completes.
 **Stage Output:** An activated initial ontology layer with initialized
 evolution-trigger state.
 
+## OMP presentation
+
+When running under OMP: For publish_ontology_build, finalize_evolution_run and visualize_ontology, pass `open_browser:false`; return the generated path, or use OMP browser tools when requested. Do not invoke Codex-only UI tools or claim a browser opened without evidence.
+
 ## Codex desktop presentation
 
-For publish_ontology_build, finalize_evolution_run and visualize_ontology, pass
+When running under Codex: For publish_ontology_build, finalize_evolution_run and visualize_ontology, pass
 presentation:"codex", open_browser:false when the Codex browser panel is available.
 Open the returned presentation.browser_url (or browser_url for visualize_ontology)
 with the available open_in_codex tool: target:{type:"browser",url:browser_url},

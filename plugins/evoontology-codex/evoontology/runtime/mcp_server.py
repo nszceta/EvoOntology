@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Any, Dict
 
 if __package__:
-    from ..workspace import resolve_workspace, resolve_workspace_for_version
+    from ..workspace import (
+        resolve_project_workspace,
+        resolve_workspace,
+        resolve_workspace_for_version,
+    )
     from . import ops
     from .runtime import SemanticLayer
     from .tools import OPERATIONS, TOOLS
@@ -18,7 +22,11 @@ else:
     from evoontology.runtime import ops
     from evoontology.runtime.runtime import SemanticLayer
     from evoontology.runtime.tools import OPERATIONS, TOOLS
-    from evoontology.workspace import resolve_workspace, resolve_workspace_for_version
+    from evoontology.workspace import (
+        resolve_project_workspace,
+        resolve_workspace,
+        resolve_workspace_for_version,
+    )
 
 _RESOURCE_URI = "evo-semantic://session-manifest"
 
@@ -51,10 +59,16 @@ def force_utf8_stdio() -> None:
 class SemanticMCPServer:
     """Serve the two semantic tools over newline-delimited JSON-RPC."""
 
-    def __init__(self, store_path: str, version: str = ""):
+    def __init__(self, store_path: str, version: str = "", *, project_aware: bool = False, default_project_root: str = ""):
         self.store_path = store_path
         self.version = version
-        self.layer = SemanticLayer.load(store_path, version=version or None)
+        self.project_aware = bool(project_aware)
+        self.default_project_root = str(default_project_root or "").strip() if self.project_aware else ""
+        if self.project_aware and self.default_project_root:
+            lane = resolve_project_workspace(store_path, self.default_project_root)
+            self.layer = SemanticLayer.load(str(lane), version=version or None)
+        else:
+            self.layer = SemanticLayer.load(store_path, version=version or None)
 
     def dispatch(self, method: str, params: Dict[str, Any]) -> Any:
         if method == "initialize":
@@ -75,7 +89,14 @@ class SemanticMCPServer:
                     semantic_args = dict(arguments or {})
                     requested_workspace = semantic_args.pop("workspace", None)
                     requested_version = str(semantic_args.pop("version", "") or "")
-                    if requested_workspace:
+                    requested_project = str(semantic_args.pop("project_root", "") or "").strip()
+                    effective_project = requested_project or self.default_project_root or ""
+                    if effective_project:
+                        base_raw = requested_workspace or self.store_path
+                        lane = resolve_project_workspace(base_raw, effective_project)
+                        semantic_workspace = Path(lane)
+                        semantic_version = requested_version or self.version or None
+                    elif requested_workspace:
                         semantic_workspace = resolve_workspace_for_version(
                             requested_workspace,
                             version=requested_version or "active",
@@ -95,7 +116,11 @@ class SemanticMCPServer:
                     is_error = True
             elif name in ops._HANDLERS:
                 try:
-                    result = ops.execute(name, arguments)
+                    effective_args = dict(arguments or {})
+                    if self.project_aware and self.default_project_root:
+                        if not str(effective_args.get("project_root") or "").strip():
+                            effective_args["project_root"] = self.default_project_root
+                    result = ops.execute(name, effective_args)
                     is_error = False
                 except Exception as exc:
                     result = {"status": "error", "message": str(exc)}
@@ -128,7 +153,11 @@ class SemanticMCPServer:
             uri = str(params.get("uri", ""))
             if uri != _RESOURCE_URI:
                 raise ValueError(f"Unknown resource: {uri}")
-            self.layer = SemanticLayer.load(self.store_path, version=self.version or None)
+            if self.project_aware and self.default_project_root:
+                lane = resolve_project_workspace(self.store_path, self.default_project_root)
+                self.layer = SemanticLayer.load(str(lane), version=self.version or None)
+            else:
+                self.layer = SemanticLayer.load(self.store_path, version=self.version or None)
             return {
                 "contents": [
                     {
@@ -212,8 +241,20 @@ def main() -> None:
         default="",
         help="Explicit semantic version to serve (default: active version)",
     )
+    parser.add_argument(
+        "--project-aware",
+        action="store_true",
+        help="Route the shared external workspace to per-project lanes; launch cwd becomes the default project_root unless a tool call passes an explicit project_root.",
+    )
     args = parser.parse_args()
-    SemanticMCPServer(str(resolve_workspace(args.store)), version=args.version).run()
+    project_aware = bool(args.project_aware)
+    default_root = str(Path.cwd().resolve()) if project_aware else ""
+    SemanticMCPServer(
+        str(resolve_workspace(args.store)),
+        version=args.version,
+        project_aware=project_aware,
+        default_project_root=default_root,
+    ).run()
 
 
 if __name__ == "__main__":

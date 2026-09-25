@@ -5,6 +5,16 @@ description: Improve an existing ontology using real project tasks and grounded 
 
 # Self-Evolving Ontology Layer
 
+## Host scope
+
+- When running under OMP: Default workspace is `/home/adam/.omp/ontologies/shared`, shared across OMP sessions and repositories. Pass that absolute path as `workspace` to every workspace-taking tool; never derive the default from the current working directory. A different workspace requires an explicit user request.
+- When running under OMP: Also pass the current canonical `project_root` (OMP ctx.cwd / repo root, absolute resolved path) to every workspace-taking tool that accepts it. The server routes shared workspace + `project_root` internally to the selected project lane under `shared/projects/<hash>`; the lane path is an implementation detail — never pass a lane as `workspace`, never construct, guess, or list it. A server launched with `--project-aware` binds its launch cwd as the default `project_root`; an explicit per-call `project_root` always overrides it, so always send the current project explicitly.
+- When running under OMP: All relative state paths below (project.json, versions/, trajectories/, evolution/) are relative to the selected project lane, not the literal shared root. Relative references/links remain relative to this skill directory.
+- When running under OMP: Preserve source/project provenance and applicability in the existing schema. `project_root` is routing identity; `data_source` is the actual data environment — they are persisted separately and must not be conflated. Do not overwrite another project's lane or equate similarly named concepts just because the repository changed.
+- When running under OMP: An empty lane is valid uninitialized state. Legacy flat files at the shared root are reused only when their persisted `project_root` or `data_source` unambiguously matches the current canonical `project_root`; otherwise the lane starts empty. Never address the literal shared-root `project.json` directly. If the selected project lane has no active version, do not evolve nothing — direct to build-ontology, which auto-builds only when a data source AND analytical goal are identifiable under its evidence + validate/publish gates (not the Parent/Candidate evolution gate); generic code tasks never trigger a build.
+- When running under OMP: Use the exposed evo-semantic MCP tools. For visualization/publication/finalization pass `open_browser:false`; return the generated path, or use OMP browser tools when requested. Do not invoke Codex-only UI tools.
+- When running under Codex: Default workspace is the current project's `.evoontology/`; pass its absolute path to every workspace-taking tool. Use an explicit path only when the user provides one. The OMP rules above do not apply; follow the Codex desktop presentation section below.
+
 Continuously improve the ontology-layer system until a credible and
 reproducibly better version is obtained.
 
@@ -51,7 +61,7 @@ for evolution.
 
 ### Step 0 — Resolve and Freeze Evolution Context
 
-1. Read `.evoontology/project.json`, the current Parent, and the latest
+1. Read `project.json` in the selected project lane (the lane routed from `/home/adam/.omp/ontologies/shared` + current canonical `project_root` under OMP — never address the literal shared-root `project.json` directly; `.evoontology/project.json` under Codex), the current Parent, and the latest
    completed evolution checkpoint.
 
 2. Resolve the data for this evolution run:
@@ -73,7 +83,7 @@ for evolution.
    if unavailable, explain what is missing without starting a doomed run.
 
 4. Persist the frozen run context through the MCP tool `start_evolution_run`
-   (it writes `evolution/run_N/run.json` with the Parent, adapter, frozen
+   (under OMP pass the shared root as `workspace` plus the current canonical `project_root`; it writes lane-relative `evolution/run_N/run.json` with the Parent, adapter, frozen
    budget, and acceptance criteria). Keep the batch's input IDs, validation
    IDs, and Evaluator reference with the run's evaluation setup.
 
@@ -299,7 +309,7 @@ If the run ended Incomplete, do not advance the checkpoint and do not switch
 
 Call `finalize_evolution_run` after either terminal outcome. It renders and opens
 Results & questions automatically, including run status, aggregate evaluation
-metrics and available public before/after replays. Use the Codex panel delivery described below; do not also open an external tab.
+metrics and available public before/after replays. Use the host presentation delivery described below (OMP: `open_browser:false`, return the path; Codex: panel delivery); do not also open an external tab.
 If rendering fails, report it separately; active version and terminal status stand.
 
 **Stage Output:** Persisted evolution results, an outcome explorer, updated active
@@ -358,9 +368,13 @@ Report:
 
 Preserve the validity of the benchmark and evaluation protocol. Do not modify benchmark questions, labels, Ground Truth, Evaluator logic, data splits, or acceptance criteria to improve results. Domain knowledge should remain in traceable semantic artifacts rather than being hidden in prompts or orchestration code.
 
+## OMP presentation
+
+When running under OMP: For publish_ontology_build, finalize_evolution_run and visualize_ontology, pass `open_browser:false`; return the generated path, or use OMP browser tools when requested. Do not invoke Codex-only UI tools or claim a browser opened without evidence.
+
 ## Codex desktop presentation
 
-For publish_ontology_build, finalize_evolution_run and visualize_ontology, pass
+When running under Codex: For publish_ontology_build, finalize_evolution_run and visualize_ontology, pass
 presentation:"codex", open_browser:false when the Codex browser panel is available.
 Open the returned presentation.browser_url (or browser_url for visualize_ontology)
 with the available open_in_codex tool: target:{type:"browser",url:browser_url},

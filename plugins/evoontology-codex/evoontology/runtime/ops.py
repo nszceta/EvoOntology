@@ -19,7 +19,7 @@ from ..validate import validate
 from ..visualization import visualize as _visualize
 from ..visualization.preview import ensure_preview
 from ..workflow import ProjectWorkflow, read_json, write_json
-from ..workspace import resolve_workspace
+from ..workspace import canonicalize_project_root, resolve_project_workspace, resolve_workspace
 
 
 def _workspace(arguments: Dict[str, Any]):
@@ -28,7 +28,14 @@ def _workspace(arguments: Dict[str, Any]):
         raise ValueError(
             "workspace is required: pass the absolute path to the .evoontology/ directory"
         )
-    return resolve_workspace(raw)
+    base = resolve_workspace(raw)
+    project_root = str(arguments.get("project_root") or "").strip()
+    if not project_root:
+        return base
+    # Project-aware mode: even an explicit workspace equal to the shared
+    # --store routes to the project lane. The helper is idempotent so
+    # present/finalize re-entry with the same project_root is safe.
+    return resolve_project_workspace(base, project_root)
 
 
 def _version(arguments: Dict[str, Any]) -> str | None:
@@ -177,7 +184,10 @@ def confirm_trajectory_sources(arguments: Dict[str, Any]) -> Dict[str, Any]:
 def accept_evolution(arguments: Dict[str, Any]) -> Dict[str, Any]:
     session = EvolutionSession(str(_workspace(arguments)))
     new_version = str(arguments.get("new_version") or "").strip() or None
-    candidate = session.latest_run().get("current_candidate", "")
+    run = session.latest_run()
+    if run is None:
+        raise ValueError("No evolution run to accept")
+    candidate = run.get("current_candidate", "")
     published = session.accept(new_version)
     report = read_json(_workspace(arguments) / "reports" / (candidate + ".json"))
     if report:
@@ -230,8 +240,17 @@ def publish_ontology_build(arguments):
 
 
 def workflow_operation(name, arguments):
-    workflow = ProjectWorkflow(_workspace(arguments))
-    args = {k: v for k, v in arguments.items() if k != "workspace"}
+    workspace = _workspace(arguments)
+    workflow = ProjectWorkflow(workspace)
+    args = {k: v for k, v in arguments.items() if k not in ("workspace", "project_root")}
+    if name == "configure":
+        project_root = str(arguments.get("project_root") or "").strip()
+        if project_root and isinstance(args.get("project"), dict):
+            # _workspace() above already validated this root via the lane
+            # resolver, so canonicalization cannot fail here.
+            project_copy = dict(args["project"])
+            project_copy["project_root"] = str(canonicalize_project_root(project_root))
+            args["project"] = project_copy
     return getattr(workflow, name)(**args)
 
 

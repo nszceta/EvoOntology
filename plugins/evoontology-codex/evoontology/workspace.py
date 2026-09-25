@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 PathLike = Union[str, Path]
 WORKSPACE_DIRNAME = ".evoontology"
 PROJECT_SCHEMA_VERSION = 1
 PROJECT_MODES = {"fixed_split", "rolling_trajectory"}
+PROJECTS_DIRNAME = "projects"
+PROJECT_LANE_HASH_LEN = 16
 
 
 def resolve_workspace(
@@ -27,6 +31,161 @@ def resolve_workspace(
         return Path(workspace).expanduser().resolve()
     root = Path(project_root) if project_root is not None else Path.cwd()
     return (root.expanduser().resolve() / WORKSPACE_DIRNAME)
+
+
+def canonicalize_project_root(project_root: PathLike) -> Path:
+    """Return the canonical Git-aware identity for ``project_root``.
+
+    Validates that the value is a non-empty absolute path, resolves symlinks,
+    then walks upward to the nearest ancestor (or self) containing a ``.git``
+    file or directory, so nested cwd directories of one checkout share a lane.
+    A ``.git`` file counts (worktrees/submodules). When no marker is found the
+    resolved path itself is the identity, so non-Git directories keep their own
+    lane. Only ``.git`` marker existence is read; no Git subprocess runs.
+
+    This is the single canonical helper: lane hashing, capture identity, and
+    persisted ``project_root`` must all delegate here instead of duplicating
+    the traversal.
+    """
+    if isinstance(project_root, Path):
+        candidate = project_root.expanduser()
+    elif isinstance(project_root, str):
+        if not project_root.strip():
+            raise ValueError("project_root must be a non-empty absolute path")
+        candidate = Path(project_root.strip()).expanduser()
+    else:
+        raise ValueError("project_root must be a non-empty absolute path")
+    if not candidate.is_absolute():
+        raise ValueError("project_root must be an absolute path")
+    resolved = candidate.resolve()
+    current = resolved
+    while True:
+        try:
+            if os.path.lexists(current / ".git"):
+                return current
+        except OSError:
+            pass
+        if current.parent == current:
+            break
+        current = current.parent
+    return resolved
+
+
+def _candidate_source_roots(data_source: Any) -> List[str]:
+    """Return path strings by which a data_source may name a project root."""
+    if isinstance(data_source, str):
+        return [data_source]
+    if isinstance(data_source, dict):
+        roots: List[str] = []
+        for key in ("root", "project_root", "path"):
+            value = data_source.get(key)
+            if isinstance(value, str) and value.strip():
+                roots.append(value)
+        return roots
+    return []
+
+
+def _flat_matches_canonical_root(flat: Path, canonical: str) -> bool:
+    """True when ``flat/project.json`` demonstrably names ``canonical``.
+
+    A present ``project_root`` key is authoritative and fails closed: only a
+    valid absolute value canonicalizing (Git-aware) to ``canonical`` reuses the
+    flat root, while any present-but-invalid or mismatched value rejects it
+    without consulting ``data_source``. Only when the key is absent does an
+    absolute ``data_source`` root/path resolving exactly to ``canonical``
+    reuse it; the ``data_source`` comparison stays an exact resolve so a
+    SQLite file inside the repo never collapses to the repo root.
+    Missing/unparseable files, relative values, and ``active.json`` alone
+    never match.
+    """
+    path = flat / "project.json"
+    if not path.is_file():
+        return False
+    try:
+        project = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(project, dict):
+        return False
+    if "project_root" in project:
+        explicit = project["project_root"]
+        if isinstance(explicit, str) and explicit.strip():
+            try:
+                return str(canonicalize_project_root(explicit.strip())) == canonical
+            except (ValueError, OSError):
+                return False
+        return False
+    for candidate_text in _candidate_source_roots(project.get("data_source")):
+        candidate = Path(candidate_text.strip()).expanduser()
+        if not candidate.is_absolute():
+            continue
+        try:
+            if str(candidate.resolve()) == canonical:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def resolve_project_workspace(
+    workspace: Optional[PathLike] = None,
+    project_root: Optional[PathLike] = None,
+) -> Path:
+    """Return the internal workspace for one project lane.
+
+    ``workspace`` is the external base (typically the shared store) and
+    ``project_root`` is the canonical project identity. Both may be passed
+    positionally or by keyword; the return is always an absolute ``Path``.
+    ``project_root`` is canonicalized Git-aware via
+    :func:`canonicalize_project_root`, so nested cwd directories of one
+    checkout hash to the same lane while distinct checkouts and non-Git
+    directories keep their own.
+
+    When ``project_root`` is ``None`` this is exactly
+    :func:`resolve_workspace` (legacy flat behavior, unchanged). When it is
+    provided, ``workspace`` must be an explicit absolute path and
+    ``project_root`` must be absolute; the result is
+    ``<base>/projects/<sha256(canonical)[:16]>`` unless ``<base>/project.json``
+    demonstrably names the same canonical root via ``project_root`` or
+    ``data_source``, in which case the flat ``<base>`` itself is reused.
+    ``active.json`` alone never triggers reuse. Passing an already-resolved
+    lane for the same root is idempotent.
+
+    This resolver is read-only: it never creates directories and never
+    writes ``project.json``. Empty lanes are valid; callers create them via
+    ``ensure_workspace``/``save_project`` on the returned path.
+    """
+    if project_root is None:
+        return resolve_workspace(workspace)
+    if workspace is None or (
+        isinstance(workspace, str) and not workspace.strip()
+    ):
+        raise ValueError(
+            "workspace is required when project_root is provided: "
+            "pass the absolute shared store path"
+        )
+    if isinstance(workspace, str):
+        base_candidate = Path(workspace.strip()).expanduser()
+    elif isinstance(workspace, Path):
+        base_candidate = workspace.expanduser()
+    else:
+        raise ValueError(
+            "workspace must be an absolute path when project_root is provided"
+        )
+    if not base_candidate.is_absolute():
+        raise ValueError(
+            "workspace must be an absolute path when project_root is provided"
+        )
+    canonical = str(canonicalize_project_root(project_root))
+    base = base_candidate.resolve()
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[
+        :PROJECT_LANE_HASH_LEN
+    ]
+    if base.parent.name == PROJECTS_DIRNAME and base.name == digest:
+        return base
+    if _flat_matches_canonical_root(base, canonical):
+        return base
+    return base / PROJECTS_DIRNAME / digest
 
 
 def resolve_workspace_for_version(
