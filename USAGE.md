@@ -1,5 +1,8 @@
 # EvoOntology 产品化使用指南
 
+第 1–9 节的安装和默认路径说明面向 Claude Code / Codex。OMP 的用户级安装、
+共享工作区和会话内自动维护见第 10 节；请勿套用前文的项目本地默认路径。
+
 本文档说明如何实际使用 EvoOntology。产品化把散落在三个 benchmark 里的通用能力抽取为
 一个**核心包** `evoontology/`（确定性能力），并配两个自包含插件：
 
@@ -201,31 +204,72 @@ agent 发布前会自动调用 `validate_semantics` 做门禁。
 
 ---
 
-## 9. 边界（一期不做）
+## 9. 边界（一期不做；以下指非 OMP 插件流程）
 
 Web UI / SaaS / 多租户 / 消息队列 / 常驻 worker / 多 Candidate 并行 / 自动循环 / 高频改
-schema 均不在本版范围。无人值守全自动进化需要常驻后台 worker，一期只做「检测 + 提醒」，
-由人触发。
+schema 均不在本版范围。非 OMP 钩子下的无人值守全自动进化需要常驻后台 worker，一期只做
+「检测 + 提醒」，由人触发。OMP 用户全局集成不受此限：其自动生命周期（采集、门禁、认领、
+同会话维护 turn）见 §10，全程跑在存活会话内，不设常驻 daemon。
 
 ---
 
 ## 10. OMP 用户全局集成（共享根 + 项目 lanes）
 
 给 oh-my-pi（OMP）用户：EvoOntology 从本 clone 以用户全局方式运行——所有项目共用
-一个外部 shared root，不写任何项目本地状态，内部按项目分 lane；每个完成的 turn
-自动追加一条 lane 内 trajectory，数据任务按需走 grounded build，普通 coding 只采集。
-本节是与英文 README 中 “OMP User-Global Integration” 对应的中文契约。
+一个外部 shared root，不写任何项目本地状态，内部按项目分 lane；每个完成的真实用户
+turn 自动追加一条 lane 内 trajectory，数据任务按需走 grounded build，普通 coding 只采集；
+会话存活时调度器可认领并启动 build / evolve / resume 维护任务。本节是与英文 README 中
+“OMP User-Global Integration” 对应的中文契约。实现位置：
+安装器 [`scripts/install_omp.py`](scripts/install_omp.py)、服务端
+[`evoontology/runtime/omp_server.py`](evoontology/runtime/omp_server.py)、调度器
+[`evoontology/omp_automation.py`](evoontology/omp_automation.py)、采集与调度扩展
+[`integrations/omp/evo-capture.ts`](integrations/omp/evo-capture.ts)。
 
-### 10.1 布局：外部共享 + 内部 lanes
+### 10.1 安装：checkout 内一条命令
+
+前置要求：已安装 `uv`（在 `PATH` 上，或经 `--uv` / `$EVO_ONTOLOGY_UV` 指定并验证可执行），
+且 OMP 已配置可用的认证模型（含 `@tiny` 模型——每 turn 门禁调用它判断是否同时给出可识别
+data source **和** analytical goal）。
+
+```bash
+cd /path/to/EvoOntology
+uv run python scripts/install_omp.py
+# 可选覆盖：--agent-dir <dir> --store <dir> --uv <path>
+```
+
+装完重启 OMP。安装器幂等，可反复运行：
+
+- 在 `<agent-dir>/mcp.json`（默认 `~/.omp/agent`）只合并 `evo-semantic` 一个条目，
+  保留所有无关字段与服务；
+- 向 `<agent-dir>/extensions/` 写 `evo-capture.ts` wrapper：文件内以文件 URI 导入本
+  checkout 的真实扩展，并以安装时解析出的 `{store, uv}` 作为默认值调用其默认导出；
+- 把三个 ontology skill（`build-ontology`、`evolve-ontology`、`explore-ontology`）
+  链接进 `<agent-dir>/skills/`（无 symlink 权限时复制并跟踪归属）；
+- 记录安装 manifest；只确保 store 目录存在，不写任何 ontology 状态
+ （不写 `state.json` / `project.json` / 版本）。
+- 安装解析出的 store 与 `uv` 永远持久化进 server 条目（`--store` 参数与 launcher
+  `command` 中的解析后可执行文件）与 wrapper 默认值；store 覆盖分两条路径一致：
+  server 与扩展进程 env 中的绝对路径 `$EVO_ONTOLOGY_STORE` 优先于安装值，安装值优先于
+  当前 `HOME` 派生默认（`~/.omp/ontologies/shared`）。`uv` 的覆盖面更窄：事后改
+  `$EVO_ONTOLOGY_UV` 不会改变 OMP 已 baked 的 MCP 启动器，只影响扩展 spawn 的子进程
+  （采集与调度器调用：env 优先于安装默认值，安装默认值优先于 `PATH` 查找）。
+  要换 MCP 启动器用的 `uv`，用新的 `--uv`（或 `$EVO_ONTOLOGY_UV`）重跑安装器并重启 OMP。
+  本节不写任何个人绝对路径。
+- 任何冲突在改动前报错且不做任何变更：无关的 `evo-semantic` 条目、占位的无关文件、
+  不可读的 `mcp.json` 都会中止安装；本 clone 名下旧的 `mcp_server` 注册与旧的同目标
+  symlink 在 rerun 时安全迁移为新形态。
+
+### 10.2 布局：外部共享 + 内部 lanes
 
 | 部件 | 路径 |
 | --- | --- |
-| Clone（改这里） | `/home/adam/src/nszceta/EvoOntology` |
-| Shared root（外部，永远是它） | `/home/adam/.omp/ontologies/shared` |
+| Clone（改这里） | `<checkout>`（安装命令中的 `--project` 指向它） |
+| Shared root（外部，永远是它） | `~/.omp/ontologies/shared`（当前用户；可被 `--store` / 绝对路径 `$EVO_ONTOLOGY_STORE` 覆盖） |
 | Lane（内部，每项目一条） | `<shared root>/projects/<sha256(canonical project_root)[:16]>/` |
-| MCP 服务 | `python -m evoontology.runtime.mcp_server --store <shared root> --project-aware`，`--project` 指向 clone |
-| 采集扩展 | 本 clone 的 [`integrations/omp/evo-capture.ts`](integrations/omp/evo-capture.ts)，用户全局加载 |
+| MCP 服务 | `evoontology.runtime.omp_server --store <shared root>`（永远 project-aware；见 10.3） |
+| 采集与调度扩展 | 本 clone 的 [`integrations/omp/evo-capture.ts`](integrations/omp/evo-capture.ts)，用户全局加载 |
 | Recorder | `python -m evoontology.trajectory.omp_capture --store <shared root>`（stdin/stdout 走 JSON） |
+| 调度器 | `python -m evoontology.omp_automation --store <shared root> --project-root <cwd>`（stdin JSON 包，stdout 恰一个 JSON 结果） |
 
 ```
 <shared root>/
@@ -236,7 +280,8 @@ schema 均不在本版范围。无人值守全自动进化需要常驻后台 wor
         ├── versions/            # 正式 ontology_vN + 候选 vN-cK，每版本 5 个 JSON
         ├── trajectories/        # 本 lane 每个任务一条 JSON trajectory
         ├── evolution/           # 本 lane 每个进化 run 一个目录 run_N/
-        └── state.json           # 本 lane Trigger checkpoint 与阈值
+        ├── state.json           # 本 lane Trigger checkpoint 与阈值
+        └── automation.json      # 本 lane 维护租约 / seed / 冷却状态（调度器读写）
 ```
 
 任何项目下都不会创建 `.evoontology/`。内部路由由
@@ -246,7 +291,7 @@ schema 均不在本版范围。无人值守全自动进化需要常驻后台 wor
 （不创建 lane）；带 `project_root` 时要求显式 workspace，否则抛错。
 
 空 lane 是合法状态：没有 `project.json`、没有 versions 时 trajectory 先攒着；数据任务
-给出可识别的数据源与分析目标后 agent 才调用 grounded workflow，缺证据时 build 中止，
+给出可识别的数据源与分析目标后 agent 才走 grounded workflow，缺证据时 build 中止，
 lane 保持为空。
 
 Legacy flat root（`project.json` 直接落在 shared root 下）仅当其持久化的
@@ -255,20 +300,19 @@ Legacy flat root（`project.json` 直接落在 shared root 下）仅当其持久
 `configure_ontology_project` 把 `project_root`（lane 身份）与真实 `data_source`
 （数据来源）分开持久化。
 
-### 10.2 MCP 设置（`~/.omp/agent/mcp.json`）
+### 10.3 MCP 设置（`~/.omp/agent/mcp.json`，安装器代写）
 
-把 `evo-semantic` 服务指向 clone，并打开项目感知：
+安装器注册的 `evo-semantic` 服务形如（`<checkout>`、`<shared root>`、`<uv>` 均为安装时解析值）：
 
 ```json
 "evo-semantic": {
   "type": "stdio",
-  "command": "/home/adam/.local/bin/uv",
+  "command": "<uv>",
   "args": [
     "run", "--offline", "--no-sync",
-    "--project", "/home/adam/src/nszceta/EvoOntology",
-    "python", "-m", "evoontology.runtime.mcp_server",
-    "--store", "/home/adam/.omp/ontologies/shared",
-    "--project-aware"
+    "--project", "<checkout>",
+    "python", "-m", "evoontology.runtime.omp_server",
+    "--store", "<shared root>"
   ],
   "env": { "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1" },
   "enabled": true,
@@ -276,44 +320,34 @@ Legacy flat root（`project.json` 直接落在 shared root 下）仅当其持久
 }
 ```
 
-- `--project` 指向 clone，`--store` 指向 shared root（外部 workspace，对所有 repo 不变）。
-- Opt-in `--project-aware` 把服务启动 cwd 绑定为默认 `project_root`；每个工具的显式
-  `project_root` 参数覆盖该默认值。
-- 不带 `project_root` 且未开 `--project-aware` 时，保持原 flat 行为。
+- `--project` 指向 clone，`--store` 为安装时解析的 shared root。
+- `omp_server` 永远 project-aware：服务启动 cwd 绑定为默认 `project_root`；每个工具的显式
+  `project_root` 参数覆盖该默认值。运行时绝对路径 `$EVO_ONTOLOGY_STORE` 优先于 `--store`。
+- 不带 `project_root` 且显式指定其他 workspace 时，保留所选 base（legacy flat 兼容）。
 
-### 10.3 扩展设置（用户全局）
+### 10.4 扩展设置（用户全局）
 
-扩展是一个默认导出的 `ExtensionAPI` factory：`agent_end`（且仅当 `!willContinue`）
-做采集，本身不直接调 MCP；它 spawn Python recorder 并传入 shared store。全局启用的
-`before_agent_start` hook 对每个真实非空用户 prompt 做静默 per-turn 门禁（不写任何状态）：
-用 isolated 无工具会话调用已配置 `@tiny` 模型，独立判断该 prompt 是否同时给出可识别
-data source **和** analytical goal。普通请求不返回任何消息（无 UI 打扰）；仅当肯定结论时，
-才注入隐藏（`display: false`）指引，指示 main agent 把 lane 检查（`list_versions`）/
-未初始化时的 grounded build 委托给 task-model `task` agent，并在最终回复中使用其结果——
-委托只是给 main agent 的指令，不是 hook 直接派发（`before_agent_start` 无法 spawn task 工具）。
-未知模型 / 出错 / 超时则 fail-open，返回隐藏的条件安全指引。Hook 永不切换会话模型，
-绝不从代码里自动 build、发布或进化；采集仍在每个完成的 turn 运行。代价：一 turn 一次小
-分类往返；若 `@tiny` 配置为云模型，有界 prompt 文本会出本机。
-
-方案 A —— 软链到自动发现的用户目录（与其他用户全局扩展同一模式）：
+扩展 wrapper 由安装器写入 agent extensions 目录，内容为导入本 checkout 真实扩展并传入
+`{store, uv}` 安装默认值；扩展子进程运行时绝对路径 `$EVO_ONTOLOGY_STORE` 优先于安装默认值，
+`$EVO_ONTOLOGY_UV` 优先于安装默认值（只影响扩展 spawn 的采集与调度器子进程，不改变
+`mcp.json` 已 baked 的 MCP 启动器——换启动器用新 `--uv` 重跑安装器，见 10.1）。
+全局启用二选一（之后重启 OMP；不需要在任何项目的 `.omp/extensions` 里声明）：
 
 ```bash
-ln -s /home/adam/src/nszceta/EvoOntology/integrations/omp/evo-capture.ts \
-  ~/.omp/agent/extensions/evo-capture.ts
+# 安装器已代写 wrapper；手工等价形态仅示意（<checkout> 换成实际 clone 路径）：
+ls ~/.omp/agent/extensions/evo-capture.ts
 ```
-
-方案 B —— 在 `~/.omp/agent/config.yml` 里显式声明：
 
 ```yaml
+# 或在 ~/.omp/agent/config.yml 里显式声明 wrapper 路径：
 extensions:
-  - /home/adam/src/nszceta/EvoOntology/integrations/omp/evo-capture.ts
+  - ~/.omp/agent/extensions/evo-capture.ts
 ```
 
-二选一后重启 OMP。不需要在任何项目的 `.omp/extensions` 里声明。
+### 10.5 自动采集（lane-aware，只采真实用户 turn）
 
-### 10.4 自动采集（lane-aware）
-
-每个完成的 OMP turn 向对应 lane 的 `trajectories/` 追加一条 trajectory：
+每个完成的真实用户 OMP turn 向对应 lane 的 `trajectories/` 追加一条 trajectory
+（`agent_end` 且仅当 `!willContinue` 时；自主维护 turn 自身不被采集、不递归）：
 
 - `question`（用户文本，必填非空）、`final_answer`（助手文本）、`status`
   （`completed` | `failed` | `interrupted`），以及按执行顺序的工具 `calls`
@@ -330,61 +364,111 @@ extensions:
 `ontology_version` 缺省记为 `"uninitialized"`：只有被证明适用于当前 lane 的
 active 版本才会被记录，别 lane 的版本不会混用。
 
-### 10.5 按需构建（on-demand grounded build）
+### 10.6 按需门禁与合格种子（YES 才留种，前台仍走 skill）
 
-- 当 turn 是数据任务、且同时给出可识别的 data source **和** analytical goal 时，
-  main agent 被指示把 grounded workflow（build-ontology skill）委托给 task-model `task` agent
-  执行，并在最终回复中使用其结果——这只是条件性指示，不保证 main agent 一定 spawn；
-  缺证据或评估不可行时 build 中止，lane 保持为空。
-  仅肯定结论才有隐藏指引，普通请求无消息。
-- 普通 coding、重构、或缺 source / 缺 goal 时，只采集观察到的 turn，不 build。
-- Build 门禁：源证据 + `validate_semantics`；Parent/Candidate gate 只用于进化发布，
-  不用于初始 build。空 lane 允许冷启动；无有效 grounding 时记 coverage gap 或已知局限，
-  不编造语义对象。
-- `configure_ontology_project` 复用 lane 内已持久化上下文；切 repo 不覆盖别 lane。
+全局 `before_agent_start` hook 对每个真实非空用户 prompt 做静默 per-turn 门禁：
+用 isolated 无工具会话调用已配置 `@tiny` 模型（分类器本身无工具、不写任何状态），独立判断
+该 prompt 是否同时给出可识别 data source **和** analytical goal。门禁本身不写 ontology
+版本状态（`project.json` / `versions/` / `evolution/`）；仅 YES 分支把脱敏截断后的 prompt
+经调度器持久化为 automation seed（只进 `automation.json`，不碰 project 上下文与版本）。
 
-### 10.6 永不自动做的事
+- 仅肯定（YES）结论才注入隐藏（`display: false`）的 build/use 指引，指示前台 agent
+  按 skill 处理 lane 检查（`list_versions`）/ 未初始化时的 grounded build 并在最终回复中
+  使用其结果；普通请求无消息、无 UI 打扰。
+- YES 的 prompt 文本经脱敏、截断后作为 automation seed 经调度器持久化（见 10.7），
+  供失败初建的唤醒与 build 任务使用；NO / unknown 不留种。
+- 未知模型 / 出错 / 超时则 fail-open，返回隐藏的条件安全指引。Hook 永不切换会话模型，
+  绝不从代码里自动 build、发布或进化；采集仍在每个完成的 turn 运行。代价：一 turn 一次小
+  分类往返；若 `@tiny` 配置为云模型，有界 prompt 文本会出本机（见 10.10）。
+- 手工 skill 调用始终允许：门禁只是前台指引，不是唯一入口。
+
+### 10.7 自动维护调度（会话内存活，无 daemon）
+
+OMP 关闭时无任何维护；会话存活期间扩展在三个时机尝试推进：会话启动、每次完成采集后、
+约 60s 的受管 idle timer。扩展按 lane 向调度器认领 durable 租约任务
+（`build` / `evolve` / `resume`，跨会话持久化在 lane 内），一次最多持有一个 job：
+认领成功后用原生同会话 custom turn（`pi.sendMessage` + `triggerTurn`，
+`MAINTENANCE_CUSTOM_TYPE`）**真正启动**该任务——执行者是前台主 agent 本人，
+不是独立 worker，不存在权限绕过。
+
+- 租约约 15 分钟并定时心跳续约；扩展侧本 job turn 执行超时约 10 分钟（只 abort
+  扩展自己的维护 turn，用户工作永不 abort）；自动预算 2 轮。
+- 用户优先：idle / 用户活动中 / 有待发送消息 / 已持 job / 冷却期内均不派发；
+  plan 与 paused-plan 下跳过；认领后复检被抢占则直接释放租约。
+- 维护 turn 结束时以 `finish` 按 lane 实际落盘状态结算（调用方不传结果标志，
+  调度器从 store 推断 completed / cooldown）；过期与重启恢复同样按持久化结果结算，
+  不捏造调度事实。受阻 / 未完成的尝试冷却约 24h；新的、不同的合格 seed 可唤醒失败的初建。
+- 调度器入口只认 stdin 单个 JSON 包（`op` 为 `status` / `seed` / `claim` /
+  `heartbeat` / `finish` / `release`），stdout 恰一个 JSON 结果。
+
+### 10.8 进化就绪与执行纪律
+
+- 就绪：checkpoint 后新增 ≥ 30 个 trajectory，或距 checkpoint ≥ 7 天；且任务另需有效
+  active parent 与已配置的 project 上下文。无 source / 无 goal 时只采集、不推断语义，
+  绝不编造。
+- 无可访问的数据源、目标或评测路径时，任务报告真实 blocker 并安全停止，不发布空版本。
+- 源数据只读；provider 与工具审批 fail-closed：被拒即安全结束并在收尾消息中报告 blocker，
+  不吞拒、不绕行，不承诺无人值守必定成功。
+- Gate 评判由宿主侧独立 agent / subagent 评估器执行并记录真实结论——不暗示 MCP 自己
+  发明或执行 judge；缺证据或证据失败时保留 parent。
+- 每次 run 在启动时冻结 `trajectory_checkpoint`，只推进到该截止（含该截止）的批次，
+  run 期间新到的 trajectory 留给下一批。
+
+### 10.9 永不自动做的事与退出
 
 - 采集不写 `project.json`、`active.json`、`versions/`、`evolution/`。
-- 代码路径不自动发布语义事实、不自动 build、不自动进化：初始发布经 skill 的源证据
-  + `validate_semantics`，进化发布另经 Parent/Candidate gate。
-- 通用 coding turn 无 hook 消息，永不触发 build；无 source 或无 goal 时只采集，不推断语义。
+- 调度代码负责触发与状态管理，原生 agent 自动按 skill 完成构建/进化；
+  初始发布仍须源证据与 `validate_semantics`，进化发布另须 Parent/Candidate gate。
+- 未通过 source + goal 分类的通用 coding turn 不会新建种子；无可识别来源和目标时
+  不得凭空构建语义事实。
+- `EVO_ONTOLOGY_AUTOMATION=0` 关闭维护派发与 YES 留种；前台指引与采集继续运行。
 
-### 10.7 有界本地持久化与隐私
+### 10.10 有界本地持久化、隐私与费用
 
-- 全部采集数据只落在 shared root 本地（各 lane 内）；随时可以查看或删除
-  `projects/<hash>/trajectories/*.json`。采集本身没有任何上传；唯一的例外是
-  10.3 的 `@tiny` 门禁往返——若 `@tiny` 配置为云模型，有界 prompt 文本会出本机。
-- Native 工具结果截断为有界预览（2000 字符 / 20 行 + 摘要）；agent 的 prose
-  和 chain-of-thought 不落盘——只保留可观察的工具输入/结果和 final answer。
-- 写入前对可疑 secret 值做 best-effort 脱敏。这是本地卫生措施，不是加密。
+- 全部采集数据只落在 shared root 本地（各 lane 内）；采集本身不上传。例外有二：
+  10.6 的 `@tiny` 门禁往返（有界 prompt 文本），以及维护 turn 内前台 agent 为执行任务
+  调用已配置模型时发送的相关 prompt / 数据预览——若配置为云模型，这些内容会出本机
+  并产生模型费用。
+- Native 工具结果截断为有界预览；agent 的 prose 和 chain-of-thought 不落盘——只保留
+  可观察的工具输入/结果和 final answer。
+- 写入前对可疑 secret 值做 best-effort 脱敏。这是本地卫生措施，不是加密 vault，
+  不要把密钥写进 prompt 或工具参数。
 
-### 10.8 切换行为
+### 10.11 状态排查（走 CLI，不翻 lane 内部）
 
-- 跨项目：外部 store 永远不动。项目身份是最近祖先 Git checkout 根（最近的 `.git`
-  文件/目录），同一 repo 内换目录仍是同一 lane；非 Git cwd 保持各自身份。trajectory、
-  版本、进化按 lane 隔离，不串扰。
-- Legacy flat：仅当持久化 `project_root` / `data_source` 无歧义匹配当前 root 才复用，
-  否则开新 lane。
-- 跨会话与重试：project + session + turn 身份保证幂等；重复投递返回
-  `already_recorded`，不会产生重复。
-- 禁用扩展或改指 MCP：采集停止，历史保留；重新启用后继续追加写入。
-- 以后 build `ontology_v0`：不重写历史 trajectory；它们只保留为候选证据，能否
-  进入进化仍取决于来源核验与评测 gate，不会自动全部成为进化证据。
-
-### 10.9 Smoke test（沙箱，不碰线上 shared root）
+排查只用调度器 `status`，不要手工浏览 lane 内部文件：
 
 ```bash
-SMOKE_STORE=$(mktemp -d /tmp/evo-smoke-XXXXXX)
-mkdir -p /tmp/evo-smoke-proj
-echo '{"project_root":"/tmp/evo-smoke-proj","session_id":"smoke","turn_id":"t1","question":"q","final_answer":"a","status":"completed","calls":[]}' \
-  | uv run --offline --no-sync --project /home/adam/src/nszceta/EvoOntology \
-    python -m evoontology.trajectory.omp_capture --store "$SMOKE_STORE"
-ls "$SMOKE_STORE"/projects/*/trajectories/
-rm -rf "$SMOKE_STORE"
+echo '{"op":"status"}' \
+  | uv run --project <checkout> python -m evoontology.omp_automation \
+    --store <ABS-STORE> --project-root <ABS-PROJECT-ROOT>
 ```
 
-Smoke 永远用临时 store：不要把演示 trajectory 写进线上
-`/home/adam/.omp/ontologies/shared`。扩展另支持测试专用的
+`<ABS-STORE>` 与 `<ABS-PROJECT-ROOT>` 均为绝对路径。返回 active 版本、project 配置、
+就绪原因、运行中 run、seed、租约、冷却与下次检查时间。
+
+### 10.12 Smoke test（沙箱，不碰线上 shared root）
+
+```bash
+SMOKE_STORE=$(mktemp -d)
+SMOKE_PROJ=$(mktemp -d)
+echo "{\"project_root\":\"$SMOKE_PROJ\",\"session_id\":\"smoke\",\"turn_id\":\"t1\",\"question\":\"q\",\"final_answer\":\"a\",\"status\":\"completed\",\"calls\":[]}" \
+  | uv run --project <checkout> \
+    python -m evoontology.trajectory.omp_capture --store "$SMOKE_STORE"
+ls "$SMOKE_STORE"/projects/*/trajectories/
+rm -rf "$SMOKE_STORE" "$SMOKE_PROJ"
+```
+
+Smoke 永远用临时 store 与临时 project 目录：不要把演示 trajectory 写进线上 shared root。
+安装器试装用全新的临时 `HOME`（如 `HOME=$(mktemp -d)` 配合 `--agent-dir` / `--store`
+指向临时目录）验证，不碰真实 `~/.omp`。扩展另支持测试专用的
 `EVO_ONTOLOGY_STORE` 绝对路径覆盖 `--store`（线上默认仍是 shared root，
-非绝对路径会被忽略并告警）。
+非绝对路径会被忽略并告警）。清理只删上面自己创建的临时目录，不做宽泛删除。
+
+### 10.13 局限（明确声明）
+
+- OMP 关闭时无维护；正常退出释放租约，异常退出的残留租约过期后按实际状态结算，
+  下次会话可恢复未完成的 run。
+- 无自动审批：任何 provider / 工具审批弹窗都需要人工原生确认。
+- 没有可访问的数据源、分析目标或评测路径就建不出 ontology：此时只报告真实 blocker，
+  不编造版本与分数。

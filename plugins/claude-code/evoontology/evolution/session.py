@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..ontology.store import SemanticStore
+from ..trajectory.trajectory import TrajectoryStore
 from ..trigger.trigger import EvolutionTrigger
 from ..workspace import PathLike, ensure_workspace, load_project, resolve_workspace
 from .adapter import normalize_result
@@ -123,6 +124,7 @@ class EvolutionSession:
 
         run_number = self._next_run_number()
         run_id = f"run_{run_number}"
+        trajectories = TrajectoryStore(self.workspace).list_since()
         run = {
             "schema_version": RUN_SCHEMA_VERSION,
             "run_id": run_id,
@@ -130,6 +132,7 @@ class EvolutionSession:
             "parent_version": str(parent_version),
             "adapter": str(adapter or ""),
             "acceptance": acceptance or {},
+            "trajectory_checkpoint": trajectories[-1]["task_id"] if trajectories else None,
             "budget": self._resolve_budget(max_rounds),
             "min_rejects_before_incomplete": self._resolve_min_rejects(),
             "round": 0,
@@ -407,8 +410,12 @@ class EvolutionSession:
         # Validate the Candidate loads before anything else changes.
         SemanticStore.load_version(self.workspace, candidate)
         target = str(new_version or "").strip() or self._next_official_version()
+        if "trajectory_checkpoint" not in run:
+            raise EvolutionError("Run has no frozen trajectory boundary; start a new run")
         SemanticStore.publish(self.workspace, candidate, target)
-        EvolutionTrigger(str(self.workspace)).advance_checkpoint()
+        EvolutionTrigger(str(self.workspace)).advance_checkpoint(
+            run["trajectory_checkpoint"], include_newest=False
+        )
         run["status"] = ACCEPTED
         run["accepted_version"] = target
         run["end_reason"] = ""
@@ -529,6 +536,26 @@ class EvolutionSession:
         run = _read_json(path)
         if not isinstance(run, dict) or run.get("run_id") != run_id:
             raise EvolutionError(f"Corrupt run record: {path}")
+        if run.get("status") == RUNNING and "trajectory_checkpoint" not in run:
+            # Upgrade persisted runs using their original start, never today's tail.
+            try:
+                started = datetime.fromisoformat(run["created_at"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise EvolutionError("Cannot recover run trajectory boundary without created_at") from exc
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            checkpoint = None
+            for record in TrajectoryStore(self.workspace).list_since():
+                try:
+                    recorded = datetime.fromisoformat(record["recorded_at"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if recorded.tzinfo is None:
+                    recorded = recorded.replace(tzinfo=timezone.utc)
+                if recorded <= started:
+                    checkpoint = record["task_id"]
+            run["trajectory_checkpoint"] = checkpoint
+            _write_json_atomic(path, run)
         return run
 
     def _require_run(self) -> Dict[str, Any]:

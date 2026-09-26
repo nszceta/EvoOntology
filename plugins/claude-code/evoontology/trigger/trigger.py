@@ -161,14 +161,18 @@ class EvolutionTrigger:
         self,
         last_trajectory_id: Optional[str] = None,
         when: Optional[datetime] = None,
+        *,
+        include_newest: bool = True,
     ) -> Dict[str, Any]:
         """Advance the checkpoint after a completed formal evolution gate.
 
         When ``last_trajectory_id`` is omitted, the most recently recorded task
         becomes the checkpoint so the next round only analyzes newer tasks.
+        Evolution runs pass their frozen boundary with ``include_newest=False``
+        so an initially empty batch never consumes tasks arriving during a run.
         ``when`` injects the checkpoint timestamp for deterministic tests.
         """
-        if last_trajectory_id is None:
+        if last_trajectory_id is None and include_newest:
             all_trajs = self.trajectories.list_since(None)
             if all_trajs:
                 last_trajectory_id = str(all_trajs[-1].get("task_id"))

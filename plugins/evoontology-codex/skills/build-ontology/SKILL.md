@@ -7,7 +7,7 @@ description: Build an initial ontology from data and analytical goals, prepare r
 
 ## Host scope
 
-- When running under OMP: Default workspace is `/home/adam/.omp/ontologies/shared`, shared across OMP sessions and repositories. Pass that absolute path as `workspace` to every workspace-taking tool; never derive the default from the current working directory. A different workspace requires an explicit user request.
+- When running under OMP: Default workspace is `~/.omp/ontologies/shared` (resolve the current user's HOME to an absolute path before calling tools; when `$EVO_ONTOLOGY_STORE` is set to an absolute path, use it instead), shared across OMP sessions and repositories. Pass that absolute path as `workspace` to every workspace-taking tool; never derive the default from the current working directory. A different workspace requires an explicit user request. When the extension's on-demand guidance names an actual workspace, use that path.
 - When running under OMP: Also pass the current canonical `project_root` (OMP ctx.cwd / repo root, absolute resolved path) to every workspace-taking tool that accepts it. The server routes shared workspace + `project_root` internally to the selected project lane under `shared/projects/<hash>`; the lane path is an implementation detail — never pass a lane as `workspace`, never construct, guess, or list it. A server launched with `--project-aware` binds its launch cwd as the default `project_root`; an explicit per-call `project_root` always overrides it, so always send the current project explicitly.
 - When running under OMP: All relative state paths below (project.json, versions/, trajectories/, evolution/) are relative to the selected project lane, not the literal shared root. Relative references/links remain relative to this skill directory.
 - When running under OMP: Preserve source/project provenance and applicability in the existing schema. `project_root` is routing identity; `data_source` is the actual data environment — they are persisted separately and must not be conflated. Do not overwrite another project's lane or equate similarly named concepts just because the repository changed.
@@ -58,7 +58,7 @@ Before construction, establish the project context and data boundary.
 If an active semantic version already exists in the selected project lane, do not rebuild or overwrite it. Direct the user to evolution unless they explicitly request a new workspace or destructive reinitialization.
 ### 1. Resolve context
 
-If `project.json` in the selected project lane exists (the lane routed from `/home/adam/.omp/ontologies/shared` + current canonical `project_root` under OMP — never address the literal shared-root `project.json` directly; `.evoontology/project.json` under Codex), load and reuse the persisted project
+If `project.json` in the selected project lane exists (the lane routed from `~/.omp/ontologies/shared` (current user's HOME, absolute) + current canonical `project_root` under OMP — never address the literal shared-root `project.json` directly; `.evoontology/project.json` under Codex), load and reuse the persisted project
 context. Do not re-infer or overwrite it unless the user explicitly requests
 reconfiguration.
 
@@ -251,7 +251,7 @@ Publish the initial ontology-layer version with:
 - seed-workload source when using Rolling-Trajectory Mode.
 
 Complete publication through the `evo-semantic` MCP tools (pass the absolute
-selected-workspace path as `workspace` — `/home/adam/.omp/ontologies/shared` under OMP, the current project's `.evoontology/` under Codex — unless the user explicitly selected another workspace; under OMP also pass the current canonical `project_root` on every call and never pass the internal lane path as `workspace`; do not run `python -m evoontology...`) in
+selected-workspace path as `workspace` — `~/.omp/ontologies/shared` (current user's HOME, absolute; `$EVO_ONTOLOGY_STORE` override when set) under OMP, the current project's `.evoontology/` under Codex — unless the user explicitly selected another workspace or the extension guidance names an actual workspace; under OMP also pass the current canonical `project_root` on every call and never pass the internal lane path as `workspace`; do not run `python -m evoontology...`) in
 this order:
 
 1. `save_version` — write `ontology_v0`'s five record files;

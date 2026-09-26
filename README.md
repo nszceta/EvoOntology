@@ -157,47 +157,112 @@ Once built, the Data Agent can call `browse_semantics` and `resolve_semantics` w
 
 ## 🖥️ OMP User-Global Integration
 
-For oh-my-pi (OMP) users, EvoOntology runs user-global from this clone: one
-external shared root (`/home/adam/.omp/ontologies/shared`) across all projects,
-no per-project `.evoontology/`, with internal per-project lanes under
-`projects/<sha256(canonical project root)[:16]>` for `project.json`,
-`active.json`, `versions/`, `trajectories/`, `evolution/`, and `state.json`.
-Project identity is the nearest ancestor Git checkout root (nearest `.git`),
-so subdirectories of one repo share a lane; non-Git cwd keeps its own identity. Each
-completed turn captures one lane-routed trajectory automatically via
+For oh-my-pi (OMP) users, EvoOntology runs user-global from this checkout:
+one external shared root (`~/.omp/ontologies/shared` for the current user)
+across all projects, no per-project `.evoontology/`, with internal
+per-project lanes under `projects/<sha256(canonical project root)[:16]>/`
+holding `project.json`, `active.json`, `versions/`, `trajectories/`,
+`evolution/`, and automation state. Project identity is the nearest ancestor
+Git checkout root (nearest `.git`), so subdirectories of one repo share a
+lane; a non-Git cwd keeps its own identity. Each completed genuine user turn
+is captured as one lane-routed trajectory by
 [`integrations/omp/evo-capture.ts`](integrations/omp/evo-capture.ts) →
 `python -m evoontology.trajectory.omp_capture`.
 
-- MCP: `evo-semantic` in `~/.omp/agent/mcp.json` with `--project` at this clone,
-  `--store` at the shared root, and opt-in `--project-aware` binding the launch
-  cwd as default `project_root`; explicit `project_root` on any tool overrides it.
-- Extension: user-global (`~/.omp/agent/extensions/` symlink or `config.yml`
-  entry); `agent_end` capture never calls MCP directly. A global
-  `before_agent_start` hook runs a silent per-turn gate (writes no state): it
-  asks the configured `@tiny` model in an isolated no-tools session whether the
-  genuine prompt identifies BOTH an identifiable data source AND an analytical
-  goal. Generic requests get no message. Only an affirmative verdict injects
-  hidden (`display: false`) guidance instructing the main agent to delegate the
-  lane check / grounded build to the task-model `task` agent and use its result
-  in the final reply — delegation is an instruction to the main agent, not a
-  direct hook dispatch (`before_agent_start` cannot spawn the task tool).
-  Unknown model, error, or timeout fails open with hidden conditional safety
-  guidance. The hook never switches the session model and never builds from
-  code; capture still runs on every completed turn. Tradeoff: one small
-  classifier round-trip per turn, and a cloud-configured `@tiny` sends bounded
-  prompt text off-host.
-- Capture writes trajectories only. On a data task with an identifiable data
-  source AND analytical goal the main agent is instructed to delegate the
-  grounded build workflow to the task-model `task` agent (source evidence +
-  `validate_semantics`) and use its result in the final reply — conditional,
-  no guarantee the main agent spawns it; missing evidence may stop the build
-  with the lane left empty. Parent/Candidate gate is evolution-only. Generic
-  coding captures the observed turn only; no fabricated semantic facts.
-- Trajectories stay local and bounded (truncated results, no prose/CoT,
-  best-effort redaction); retries are idempotent by project + session + turn.
+- Prerequisites: `uv` installed (on `PATH`, or via `--uv` /
+  `$EVO_ONTOLOGY_UV`), plus a configured OMP authenticated model including a
+  `@tiny` model — the per-turn gate calls `@tiny` to judge whether a prompt
+  identifies BOTH a data source AND an analytical goal.
+- Install from this checkout, then restart OMP:
 
-Full setup, lane layout, routing, capture/build contract, privacy, switching,
-and a sandboxed smoke test: [USAGE.md §10](USAGE.md) (Chinese-language contract).
+```bash
+cd /path/to/EvoOntology
+uv run python scripts/install_omp.py
+# optional overrides: --agent-dir <dir> --store <dir> --uv <path>
+```
+
+  The installer ([`scripts/install_omp.py`](scripts/install_omp.py)) registers
+  the `evo-semantic` stdio server (module
+  `evoontology.runtime.omp_server`, always project-aware with the launch cwd
+  as default `project_root`; explicit `project_root` on any tool overrides
+  it), writes an `evo-capture.ts` wrapper into the agent extensions dir that
+  imports the real extension from this checkout with install-resolved
+  `{store, uv}` defaults, symlinks (or, where symlinks are unavailable,
+  copies with ownership tracking) the three ontology skills, and records a
+  manifest. It always persists the resolved store + `uv` into the server
+  entry and wrapper, preserves unrelated `mcp.json` settings, refuses
+  foreign files at its paths, migrates this clone's own legacy
+  `mcp_server`-based registration and legacy same-target symlinks on rerun,
+  and writes no ontology state (only ensures the store directory exists).
+  Precedence is runtime env first for the store on both paths: an absolute
+  `$EVO_ONTOLOGY_STORE` in the server or extension process environment wins
+  over the installed `--store` default, which wins over the current-`HOME`
+  default (`~/.omp/ontologies/shared`). For `uv` the split is narrower: the
+  `mcp.json` launcher `command` is the resolved executable baked in at
+  install time, so a later `$EVO_ONTOLOGY_UV` does NOT change OMP's baked MCP
+  launcher — it only affects extension-spawned subprocesses (capture and
+  coordinator calls, where env wins over the installed default over `PATH`
+  lookup). To point the MCP launcher at a different `uv`, rerun the
+  installer with the new `--uv` (or `$EVO_ONTOLOGY_UV`) and restart OMP.
+- Gate and capture: a global `before_agent_start` hook runs a silent per-turn
+  gate: it asks `@tiny` in an isolated session (the classifier itself has no
+  tools and writes no state) whether the genuine prompt identifies BOTH
+  source AND goal. Generic turns get no message; only a YES verdict injects
+  hidden (`display: false`) build/use guidance for the foreground agent
+  (manual skill use stays allowed) and persists the sanitized, bounded prompt
+  as an automation seed via the coordinator. Unknown model, error, or timeout
+  fails open with hidden conditional safety guidance. The hook never switches
+  the session model and never builds from code.
+- Automation scheduler: while the OMP session is alive, the extension may act
+  at session startup, after each completed capture, and on a managed ~60s
+  idle timer. There is no daemon when OMP is closed. It claims at most one
+  durable per-project-lease job per lane from the coordinator
+  (`evoontology.omp_automation`: `build` / `evolve` / `resume`) and starts it
+  as a real native same-session custom turn (`pi.sendMessage` with
+  `triggerTurn`) run by the foreground agent itself — never a separate
+  worker, never an approval or provider-check bypass. The lease is
+  ~15 min with heartbeat; the extension's own job-turn execution timeout is
+  ~10 min; the automatic budget is 2 rounds. User input always preempts:
+  idle/user-activity guards plus plan and paused-plan detection skip
+  dispatch, maintenance turns are never recaptured and never recursive, and
+  a genuine user arriving mid-job falls through to the normal capture path.
+  Expiration and restart recovery settle from actual persisted lane outcomes
+  (never caller flags); blocked/incomplete attempts cool down ~24h, while a
+  new distinct qualified seed may wake a failed initial build.
+- Evolution readiness is 30 new captures OR 7 days since checkpoint, and a job
+  additionally requires a valid active parent plus configured project context
+  — without an accessible source, goal, or evaluation the attempt reports a
+  real blocker instead of inventing one. Source data stays read-only and
+  provider/tool approvals fail closed (a denial ends the attempt; unattended
+  success is never guaranteed). Gate judges run as independent host
+  agent/subagent evaluators — the MCP layer never invents or executes the
+  verdict itself — and the parent is preserved on missing or failed evidence.
+  Each run freezes its `trajectory_checkpoint` at start and only advances
+  through that cutoff, so arrivals during the run remain for the next batch.
+- Opt out with `EVO_ONTOLOGY_AUTOMATION=0` (disables maintenance dispatch and
+  YES-seeding; foreground guidance and capture keep running). Capture
+  redaction is best-effort local hygiene, not a secret vault: classification
+  and maintenance turns may send relevant prompt/data previews to the
+  configured cloud provider and incur model cost.
+- Status and troubleshooting go through the coordinator CLI, not by browsing
+  lane internals:
+
+```bash
+cd /path/to/EvoOntology
+echo '{"op":"status"}' \
+  | uv run python -m evoontology.omp_automation \
+    --store <ABS-STORE> --project-root <ABS-PROJECT-ROOT>
+```
+
+  Sandbox smoke tests must use a tempfile store (and a fresh `HOME` for
+  installer trials) so live-store fixtures are never touched; never delete
+  beyond those scoped temp dirs.
+- Limitations: no maintenance while OMP is closed; no automatic approvals;
+  nothing can be built without an accessible source, goal, and evaluation
+  path — real blockers are reported, not papered over.
+
+Full lane layout, routing, capture/build contract, privacy, switching, and a
+sandboxed smoke test: [USAGE.md §10](USAGE.md) (Chinese-language contract).
 
 
 ## 📊 Performance

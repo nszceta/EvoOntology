@@ -7,7 +7,7 @@ description: Improve an existing ontology using real project tasks and grounded 
 
 ## Host scope
 
-- When running under OMP: Default workspace is `/home/adam/.omp/ontologies/shared`, shared across OMP sessions and repositories. Pass that absolute path as `workspace` to every workspace-taking tool; never derive the default from the current working directory. A different workspace requires an explicit user request.
+- When running under OMP: Default workspace is `~/.omp/ontologies/shared` (resolve the current user's HOME to an absolute path before calling tools; when `$EVO_ONTOLOGY_STORE` is set to an absolute path, use it instead), shared across OMP sessions and repositories. Pass that absolute path as `workspace` to every workspace-taking tool; never derive the default from the current working directory. A different workspace requires an explicit user request. When the extension's on-demand guidance names an actual workspace, use that path.
 - When running under OMP: Also pass the current canonical `project_root` (OMP ctx.cwd / repo root, absolute resolved path) to every workspace-taking tool that accepts it. The server routes shared workspace + `project_root` internally to the selected project lane under `shared/projects/<hash>`; the lane path is an implementation detail — never pass a lane as `workspace`, never construct, guess, or list it. A server launched with `--project-aware` binds its launch cwd as the default `project_root`; an explicit per-call `project_root` always overrides it, so always send the current project explicitly.
 - When running under OMP: All relative state paths below (project.json, versions/, trajectories/, evolution/) are relative to the selected project lane, not the literal shared root. Relative references/links remain relative to this skill directory.
 - When running under OMP: Preserve source/project provenance and applicability in the existing schema. `project_root` is routing identity; `data_source` is the actual data environment — they are persisted separately and must not be conflated. Do not overwrite another project's lane or equate similarly named concepts just because the repository changed.
@@ -61,7 +61,7 @@ for evolution.
 
 ### Step 0 — Resolve and Freeze Evolution Context
 
-1. Read `project.json` in the selected project lane (the lane routed from `/home/adam/.omp/ontologies/shared` + current canonical `project_root` under OMP — never address the literal shared-root `project.json` directly; `.evoontology/project.json` under Codex), the current Parent, and the latest
+1. Read `project.json` in the selected project lane (the lane routed from `~/.omp/ontologies/shared` (current user's HOME, absolute) + current canonical `project_root` under OMP — never address the literal shared-root `project.json` directly; `.evoontology/project.json` under Codex), the current Parent, and the latest
    completed evolution checkpoint.
 
 2. Resolve the data for this evolution run:
@@ -69,9 +69,10 @@ for evolution.
    * **Fixed-Split Mode:** reuse the persisted evolution-training and
      validation subsets.
 
-   * **Rolling-Trajectory Mode:** collect eligible Task trajectories after the
-     latest checkpoint, freeze the batch, and split it into Evolution Pool and
-     Validation Reserve according to
+   * **Rolling-Trajectory Mode:** identify eligible Task trajectories after the
+     latest completed checkpoint. After step 4 records the run boundary, freeze
+     the batch through its `trajectory_checkpoint` and split it into Evolution
+     Pool and Validation Reserve according to
      `references/ontology-layer-data-boundary.md`.
 
 3. Fix the Evaluator and acceptance criteria. Reuse a saved or explicitly
@@ -86,6 +87,12 @@ for evolution.
    (under OMP pass the shared root as `workspace` plus the current canonical `project_root`; it writes lane-relative `evolution/run_N/run.json` with the Parent, adapter, frozen
    budget, and acceptance criteria). Keep the batch's input IDs, validation
    IDs, and Evaluator reference with the run's evaluation setup.
+   The returned `trajectory_checkpoint` is the last trajectory present when
+   the run started; `null` means that trajectory batch was empty, not unbounded.
+   Exclude later arrivals from this run. Resume with the original cutoff,
+   input IDs, split, and remaining budget; never reset them to the newest tail.
+   Acceptance advances only through that cutoff, leaving later arrivals due
+   for a subsequent run.
 
 Record IDs only; do not duplicate trajectory files.
 

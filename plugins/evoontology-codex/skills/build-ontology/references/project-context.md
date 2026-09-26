@@ -10,11 +10,11 @@ It is created during the initial build and reused by later evolution runs.
 The context is stored at the selected project lane's `project.json`:
 
 ```text
-OMP: <shared root + project_root>/project.json (internal lane under /home/adam/.omp/ontologies/shared/projects/<hash>/project.json; never address directly — pass shared root as workspace plus the current canonical project_root and let the server route)
+OMP: <shared root + project_root>/project.json (internal lane under ~/.omp/ontologies/shared/projects/<hash>/project.json for the current user; never address directly — pass shared root as workspace plus the current canonical project_root and let the server route)
 Codex: <project-root>/.evoontology/project.json
 ```
 
-When running under OMP, this installation uses one user-global external workspace by default. A different
+When running under OMP, this installation uses one user-global external workspace by default (`~/.omp/ontologies/shared` for the current user — resolve HOME to an absolute path before calling tools; an absolute `$EVO_ONTOLOGY_STORE` overrides it). A different
 workspace must be explicitly selected by the user. The server routes the shared root + current canonical `project_root` (OMP ctx.cwd / repo root) internally to one project lane under `shared/projects/<hash>`; the lane path is an implementation detail. The context describes the
 authorized data environment, not whichever repository happens to be current.
 Preserve project/data-source provenance and do not overwrite another lane's context on a cwd change. An empty lane (no `project.json`) is valid uninitialized state. Legacy flat files at the shared root are reused only when their persisted `project_root` or `data_source` unambiguously matches the current canonical `project_root`.

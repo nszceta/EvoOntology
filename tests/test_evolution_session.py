@@ -9,6 +9,8 @@ from evoontology import (
     EvolutionError,
     EvolutionSession,
     SemanticStore,
+    EvolutionTrigger,
+    TrajectoryStore,
     ensure_workspace,
     normalize_result,
 )
@@ -377,3 +379,51 @@ def test_normalize_result_contract():
         normalize_result({"metrics": "bad"})
     with pytest.raises(ValueError):
         normalize_result("not a dict")
+
+
+@pytest.mark.parametrize("initial_task", [None, "before_run"])
+def test_accept_preserves_trajectories_arriving_during_run(tmp_path, initial_task):
+    ws = _setup(tmp_path)
+    trajectories = TrajectoryStore(ws)
+    if initial_task:
+        trajectories.append({"task_id": initial_task}, recorded_at="2026-01-01T00:00:00+00:00")
+    session = EvolutionSession(ws)
+    session.start_run("ontology_v0")
+    session.begin_round("Exercise frozen batch checkpoint", "candidate")
+    SemanticStore.save_version(ws, "candidate", _candidate())
+    trajectories.append(
+        {"task_id": "arrived_during_run"}, recorded_at="2026-01-02T00:00:00+00:00"
+    )
+    _record_passing_gate(session)
+
+    resumed = EvolutionSession(ws)
+    resumed.resume()
+    resumed.accept()
+
+    state = json.loads((ws / "state.json").read_text(encoding="utf-8"))
+    assert state["checkpoint_trajectory"] == initial_task
+    assert EvolutionTrigger(ws).check()["new_trajectories"] == 1
+    assert [record["task_id"] for record in trajectories.list_since(initial_task)] == [
+        "arrived_during_run"
+    ]
+
+
+def test_resume_migrates_old_run_boundary_from_original_start(tmp_path):
+    ws = _setup(tmp_path)
+    trajectories = TrajectoryStore(ws)
+    trajectories.append({"task_id": "before"}, recorded_at="2026-01-01T00:00:00+00:00")
+    session = EvolutionSession(ws)
+    session.start_run("ontology_v0")
+    saved = session.run
+    saved.pop("trajectory_checkpoint")
+    saved["created_at"] = "2026-01-02T00:00:00+00:00"
+    (session.run_dir / "run.json").write_text(json.dumps(saved), encoding="utf-8")
+    trajectories.append({"task_id": "after"}, recorded_at="2026-01-03T00:00:00+00:00")
+
+    resumed = EvolutionSession(ws)
+    assert resumed.resume()["trajectory_checkpoint"] == "before"
+    resumed.begin_round("Exercise persisted boundary migration", "candidate")
+    SemanticStore.save_version(ws, "candidate", _candidate())
+    _record_passing_gate(resumed)
+    resumed.accept()
+    assert EvolutionTrigger(ws).check()["new_trajectories"] == 1
